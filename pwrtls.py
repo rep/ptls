@@ -89,19 +89,11 @@ class PTLS_Socket(object):
 		lengthbytes = self._recv(4)
 		if len(lengthbytes) < 4: raise pwrtls_exception('Invalid frame.')
 
-		# delim start check
-		delim_start = self._recv(1)
-		if delim_start != ':': raise pwrtls_exception('Invalid frame.')
-
 		framelen = struct.unpack('!I', lengthbytes)[0]
 		buf = ''
 		while len(buf) < framelen:
 			tmp = self._recv(min(BUFSIZE, framelen-len(buf)))
 			buf += tmp
-
-		# delim end check
-		delim_end = self._recv(1)
-		if delim_end != ',': raise pwrtls_exception('Invalid frame.')
 
 		return buf
 
@@ -127,7 +119,7 @@ class PTLS_Socket(object):
 		return len(data)
 
 	def _send_frame(self, data):
-		data = struct.pack('!I', len(data)) + ':' + data + ','
+		data = struct.pack('!I', len(data)) + data
 		self._sock.sendall(data)
 
 	def do_handshake(self):
