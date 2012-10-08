@@ -9,10 +9,12 @@
 # - pcat connect --sock 127.0.0.1:6666 --state state2 --rpub <remote pub key>
 
 
+import os
 import sys
 import traceback
 import argparse
 import logging
+import fcntl
 
 import gevent.server
 import gevent.socket
@@ -22,7 +24,11 @@ import pwrtls
 logger = logging.getLogger('pcat')
 BUFSIZE = 16*1024
 
+def fdnonblock(fd):
+	fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
+
 def forwardstdin(stdin, sock):
+	fdnonblock(stdin.fileno())
 	try:
 		while True:
 			gevent.select.select([stdin], [], [])
@@ -35,14 +41,15 @@ def forwardstdin(stdin, sock):
 		print 'exc in forwardstdin'
 		traceback.print_exc()
 
-def forwardsock(sock, stdin):
+def forwardsock(sock, stdout):
+	fdnonblock(stdout.fileno())
 	try:
 		while True:
 			data = sock.read()
 			if not data: break
-			stdin.write('from sock: ' + data)
-	except pwrtls.pwrtls_closed:
-		pass
+			stdout.write(data)
+	except pwrtls.pwrtls_closed: pass
+	except KeyboardInterrupt: pass
 	except:
 		print 'exc in forwardsock'
 		traceback.print_exc()
@@ -69,13 +76,11 @@ def main():
 		socket = gevent.socket.create_connection((ip, port))
 		socket = pwrtls.wrap_socket(socket, **state)
 		socket.do_handshake()
+		print 'remote longpub', socket.remote_longpub.encode('hex')
 		socket.write('hello from client!\n')
-		#g1 = gevent.spawn(forwardstdin, sys.stdin, socket)
-		#print 'spawned g1'
+		g1 = gevent.spawn(forwardstdin, sys.stdin, socket)
 		forwardsock(socket, sys.stdout)
-		print 'forwardsock end'
-		#g1.kill()
-		#print 'killed g1'
+		print 'server gone'
 		socket.close()
 
 	elif args.action[0] == 'l':
@@ -83,16 +88,34 @@ def main():
 		else: ip, port = '0.0.0.0', args.sock
 		port = int(port)
 
+		lsocket = gevent.socket.socket()
+		lsocket.setsockopt(gevent.socket.SOL_SOCKET, gevent.socket.SO_REUSEADDR, 1)
+		lsocket.bind((ip, port))
+		lsocket.listen(1)
+		socket, addr = lsocket.accept()
+		lsocket.close()
+		print 'new client:', addr
+		socket = pwrtls.wrap_socket(socket, server_side=True, **state)
+		socket.do_handshake()
+		print 'remote longpub', socket.remote_longpub.encode('hex')
+		socket.write('hello from server\n')
+		forwardsock(socket, sys.stdout)
+		print 'client gone', addr
+		socket.close()
+
+	elif args.action[0] == 's':
+		if ':' in args.sock: ip, port = args.sock.split(':', 1)
+		else: ip, port = '0.0.0.0', args.sock
+		port = int(port)
+
 		def handle(sock, addr):
+			print 'new client:', addr
 			socket = pwrtls.wrap_socket(sock, server_side=True, **state)
 			socket.do_handshake()
+			print 'remote longpub', socket.remote_longpub.encode('hex')
 			socket.write('hello from server\n')
-			try:
-				print ' client>', socket.read()
-				forwardsock(socket, sys.stdout)
-			except pwrtls.pwrtls_closed:
-				pass
-				
+			forwardsock(socket, sys.stdout)
+			print 'client gone', addr
 			socket.close()
 
 		server = gevent.server.StreamServer((ip, port), handle)

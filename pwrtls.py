@@ -16,7 +16,6 @@ import os
 import struct
 import random
 import logging
-import traceback
 
 import bson
 import nacl
