@@ -39,7 +39,7 @@ server_hello_msg:
 {
 	box: crypto_box({
 		spub: short-term public key,
-		OPTIONAL pskv: crypto_secretbox(client short-term public key + 1),
+		OPTIONAL pskv: crypto_secretbox(client short-term public key),
 		OPTIONAL cav: crypto_sign(long-term public key)
 	}),
 	lpub: long-term public key
@@ -58,7 +58,7 @@ client_verify_msg:
 		lpub: long-term public key,
 		v: crypto_box(short-term public key),
 		vn: verifybox_nonce,
-		OPTIONAL pskv: crypto_secretbox(server short-term public key + 1)
+		OPTIONAL pskv: crypto_secretbox(server short-term public key)
 		OPTIONAL cav: crypto_sign(long-term public key)
 	})
 }

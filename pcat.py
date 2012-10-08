@@ -25,13 +25,26 @@ BUFSIZE = 16*1024
 def forwardstdin(stdin, sock):
 	try:
 		while True:
-			gevent.select([stdin], [], [])
+			gevent.select.select([stdin], [], [])
 			data = stdin.read()
-			if not data:
-				break
+			if not data: break
 			sock.send(data)
+	except pwrtls.pwrtls_closed:
+		pass
 	except:
 		print 'exc in forwardstdin'
+		traceback.print_exc()
+
+def forwardsock(sock, stdin):
+	try:
+		while True:
+			data = sock.read()
+			if not data: break
+			stdin.write('from sock: ' + data)
+	except pwrtls.pwrtls_closed:
+		pass
+	except:
+		print 'exc in forwardsock'
 		traceback.print_exc()
 
 def main():
@@ -55,8 +68,14 @@ def main():
 
 		socket = gevent.socket.create_connection((ip, port))
 		socket = pwrtls.wrap_socket(socket, **state)
-		#socket.connect()
 		socket.do_handshake()
+		socket.write('hello from client!\n')
+		#g1 = gevent.spawn(forwardstdin, sys.stdin, socket)
+		#print 'spawned g1'
+		forwardsock(socket, sys.stdout)
+		print 'forwardsock end'
+		#g1.kill()
+		#print 'killed g1'
 		socket.close()
 
 	elif args.action[0] == 'l':
@@ -67,6 +86,13 @@ def main():
 		def handle(sock, addr):
 			socket = pwrtls.wrap_socket(sock, server_side=True, **state)
 			socket.do_handshake()
+			socket.write('hello from server\n')
+			try:
+				print ' client>', socket.read()
+				forwardsock(socket, sys.stdout)
+			except pwrtls.pwrtls_closed:
+				pass
+				
 			socket.close()
 
 		server = gevent.server.StreamServer((ip, port), handle)

@@ -16,6 +16,7 @@ import os
 import struct
 import random
 import logging
+import traceback
 
 import bson
 import nacl
@@ -75,8 +76,7 @@ def from_bson(enced, *args):
 
 class PTLS_Socket(object):
 
-	def __init__(self, sock, pubkey=None, privkey=None, nonce=None):
-		print 'PTLS_Socket init', repr(nonce)
+	def __init__(self, sock, validate_cb=None, pubkey=None, privkey=None, nonce=None):
 		self._sock = socket(_sock=sock)
 
 		self.pubkey = pubkey
@@ -84,6 +84,8 @@ class PTLS_Socket(object):
 		self.nonce = nonce
 		self.shortpub, self.shortpriv = nacl.crypto_box_keypair()
 		self.rbuf = ''
+		self.validate_cb = validate_cb
+		self.psk, self.cav = None, None
 
 	def _recv_frame(self):
 		lengthbytes = self._recv(4)
@@ -91,10 +93,9 @@ class PTLS_Socket(object):
 
 		framelen = struct.unpack('!I', lengthbytes)[0]
 		buf = ''
-		while len(buf) < framelen:
-			tmp = self._recv(min(BUFSIZE, framelen-len(buf)))
+		while len(buf) < framelen-4:
+			tmp = self._recv(min(BUFSIZE, framelen-4-len(buf)))
 			buf += tmp
-
 		return buf
 
 	def _recv(self, length):
@@ -119,24 +120,20 @@ class PTLS_Socket(object):
 		return len(data)
 
 	def _send_frame(self, data):
-		data = struct.pack('!I', len(data)) + data
+		data = struct.pack('!I', len(data)+4) + data
 		self._sock.sendall(data)
 
 	def do_handshake(self):
 		raise Exception("Implement in subclass!")
 
 	def _message(self, data):
-		m = { 
-			'box': _b(nacl.crypto_box(data, snonce(self.shortnonce), self.remote_shortpub, self.shortpriv)), 
-			'n': self.shortnonce
-		}
-
+		m = nacl.crypto_box(data, snonce(self.shortnonce), self.remote_shortpub, self.shortpriv)
 		self.shortnonce += 2
-		return bson.BSON.encode(m)
+		return m
 
 	def _open_message(self, data):
-		box, tmpnonce = from_bson(data, 'box', 'n')
-		opened = nacl.crypto_box_open(box, snonce(tmpnonce), self.remote_shortpub, self.shortpriv)
+		opened = nacl.crypto_box_open(data, snonce(self.remotenonce), self.remote_shortpub, self.shortpriv)
+		self.remotenonce += 2
 		return opened
 
 	def close(self):
@@ -150,13 +147,24 @@ class PTLS_Socket(object):
 
 class PTLS_Server(PTLS_Socket):
 
+	def __init__(self, *args, **kwargs):
+		PTLS_Socket.__init__(self, *args, **kwargs)
+		self.shortnonce = 4
+		self.remotenonce = 5
+
+		# hint cb only called if client sends hints
+		self.hint_cb = None
+
 	def do_handshake(self):
 		"""Perform a PTLS handshake."""
-		self.shortnonce = 4
-
 		# first frame is client_hello, with his short-term pubkey
 		data = self._recv_frame()
-		self.remote_shortpub = from_bson(data, 'spub')
+		self.remote_shortpub, pskhint, cahint = from_bson(data, 'spub', 'pskhint', 'cahint')
+
+		# in case we get a hint we need to get the respective psk/cav
+		if pskhint or cahint:
+			if not self.hint_cb: raise pwrtls_exception('Hint supplied, but no hint_cb set.')
+			self.psk, self.cav = self.hint_cb()
 
 		# now send our hello message with short-term pubkey
 		self._send_frame(self.serverhello())
@@ -164,7 +172,22 @@ class PTLS_Server(PTLS_Socket):
 		# receive verification message for authenticating the short-term key
 		data = self._recv_frame()
 		opened = nacl.crypto_box_open(data, snonce(3), self.remote_shortpub, self.shortpriv)
-		remote_longpub, vbox, vnonce = from_bson(opened, 'lpub', 'v', 'vn')
+		self.remote_longpub, vbox, vnonce, pskv, cav = from_bson(opened, 'lpub', 'v', 'vn', 'pskv', 'cav')
+
+		# check verifybox
+		inner_spub = None
+		try: inner_spub = nacl.crypto_box_open(vbox, vnonce, self.remote_longpub, self.privkey)
+		except ValueError: pass
+		if not inner_spub == str(self.remote_shortpub):
+			raise pwrtls_exception('Verifybox failure, client not in posession of correct private keys!')
+
+		# now actual remote authentication must happen
+		# verifybox is checked before this because validate_cb probably costs more
+		if not self.validate_cb:
+			logger.critical('PTLS socket has no validate_cb, connection will be INSECURE!')
+		else:
+			if not self.validate_cb(self.remote_longpub, pskv, cav):
+				raise pwrtls_exception('Validation callback veto.')
 
 	def serverhello(self):
 		m = {
@@ -175,22 +198,33 @@ class PTLS_Server(PTLS_Socket):
 				snonce(2), self.remote_shortpub, self.privkey)),
 			'lpub': _b(self.pubkey),
 		}
-		return bson.BSON.encode(m)
+		enc = bson.BSON.encode(m)
+		return enc
 
 
 class PTLS_Client(PTLS_Socket):
 
+	def __init__(self, *args, **kwargs):
+		PTLS_Socket.__init__(self, *args, **kwargs)
+		self.shortnonce = 5
+		self.remotenonce = 4
+
 	def do_handshake(self):
 		"""Perform a PTLS handshake."""
-		self.shortnonce = 5
-
 		self._send_frame(self.clienthello())
 
 		# receive server hello with his short-term pubkey
 		data = self._recv_frame()
 		box, self.remote_longpub = from_bson(data, 'box', 'lpub')
 		srvhello = nacl.crypto_box_open(box, snonce(2), self.remote_longpub, self.shortpriv)
-		self.remote_shortpub = from_bson(srvhello, 'spub')
+		self.remote_shortpub, pskv, cav = from_bson(srvhello, 'spub', 'pskv', 'cav')
+
+		# now actual remote authentication must happen
+		if not self.validate_cb:
+			logger.critical('PTLS socket has no validate_cb, connection will be INSECURE!')
+		else:
+			if not self.validate_cb(self.remote_longpub, pskv, cav):
+				raise pwrtls_exception('Validation callback veto.')
 
 		# send verification message authenticating our short-term key with our long-term one
 		self._send_frame(self.clientverify())
@@ -205,14 +239,12 @@ class PTLS_Client(PTLS_Socket):
 		self.nonce += 1
 
 		vn = lnonce(self.nonce)
-		verifybox = _b(nacl.crypto_box(
-			self.shortpub, vn, self.remote_longpub, self.privkey
-		))
+		verifybox = nacl.crypto_box(self.shortpub, vn, self.remote_longpub, self.privkey)
 
 		m = _b(nacl.crypto_box(
 			str(bson.BSON.encode({
 				'lpub': _b(self.pubkey),
-				'v': verifybox,
+				'v': _b(verifybox),
 				'vn': _b(vn),
 			})),
 			snonce(3), self.remote_shortpub, self.shortpriv
@@ -229,9 +261,9 @@ def wrap_socket(sock, pubkey=None, privkey=None, nonce=None,
 		return PTLS_Client(sock, pubkey=pubkey, privkey=privkey, nonce=nonce)
 
 
-def verify_remote_longterm_pubkey():
-	# we can only open this if we actually have the clients long-term key.
-	if self.rpub:
-		if str(remote_longpub) != self.rpub: raise pwrtls_exception('remote long-term key mismatch.')
-		boxshort = nacl.crypto_box_open(vbox, vnonce, self.rpub, self.privkey)
-		if str(boxshort) != str(self.remote_shortpub): raise pwrtls_exception('remote short-term key verify failed.')
+def validator_longterm_pubkey(knownkey):
+	return lambda lpub, pskv, cav: lpub == knownkey
+
+def validator_psk(psk):
+	# TODO
+	return lambda lpub, pskv, cav: lpub == knownkey
