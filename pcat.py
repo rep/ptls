@@ -18,7 +18,6 @@ import fcntl
 
 import gevent.server
 import gevent.socket
-import gevent.select
 import pwrtls
 
 logger = logging.getLogger('pcat')
@@ -27,31 +26,18 @@ BUFSIZE = 16*1024
 def fdnonblock(fd):
 	fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) | os.O_NONBLOCK)
 
-def forwardstdin(stdin, sock):
-	fdnonblock(stdin.fileno())
+def forward(a, b):
 	try:
 		while True:
-			gevent.select.select([stdin], [], [])
-			data = stdin.read()
+			gevent.socket.wait_read(a.fileno())
+			data = a.read()
 			if not data: break
-			sock.send(data)
-	except pwrtls.pwrtls_closed:
-		pass
-	except:
-		print 'exc in forwardstdin'
-		traceback.print_exc()
-
-def forwardsock(sock, stdout):
-	fdnonblock(stdout.fileno())
-	try:
-		while True:
-			data = sock.read()
-			if not data: break
-			stdout.write(data)
+			gevent.socket.wait_write(b.fileno())
+			b.write(data)
 	except pwrtls.pwrtls_closed: pass
 	except KeyboardInterrupt: pass
 	except:
-		print 'exc in forwardsock'
+		print 'exc in forward'
 		traceback.print_exc()
 
 def main():
@@ -66,6 +52,9 @@ def main():
 
 	state = pwrtls.state_file(args.state)
 
+	fdnonblock(sys.stdin.fileno())
+	fdnonblock(sys.stdout.fileno())
+
 	if args.rpub:
 		args.rpub = args.rpub.decode('hex')
 
@@ -77,9 +66,8 @@ def main():
 		socket = pwrtls.wrap_socket(socket, **state)
 		socket.do_handshake()
 		print 'remote longpub', socket.remote_longpub.encode('hex')
-		socket.write('hello from client!\n')
-		g1 = gevent.spawn(forwardstdin, sys.stdin, socket)
-		forwardsock(socket, sys.stdout)
+		g1 = gevent.spawn(forward, sys.stdin, socket)
+		forward(socket, sys.stdout)
 		print 'server gone'
 		socket.close()
 
@@ -98,8 +86,8 @@ def main():
 		socket = pwrtls.wrap_socket(socket, server_side=True, **state)
 		socket.do_handshake()
 		print 'remote longpub', socket.remote_longpub.encode('hex')
-		socket.write('hello from server\n')
-		forwardsock(socket, sys.stdout)
+		g1 = gevent.spawn(forward, sys.stdin, socket)
+		forward(socket, sys.stdout)
 		print 'client gone', addr
 		socket.close()
 
@@ -113,8 +101,7 @@ def main():
 			socket = pwrtls.wrap_socket(sock, server_side=True, **state)
 			socket.do_handshake()
 			print 'remote longpub', socket.remote_longpub.encode('hex')
-			socket.write('hello from server\n')
-			forwardsock(socket, sys.stdout)
+			forward(socket, sys.stdout)
 			print 'client gone', addr
 			socket.close()
 

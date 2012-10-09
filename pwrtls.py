@@ -144,6 +144,9 @@ class PTLS_Socket(object):
 	def read(self):
 		return self.recv(BUFSIZE)
 
+	def fileno(self):
+		return self._sock.fileno()
+
 class PTLS_Server(PTLS_Socket):
 
 	def __init__(self, *args, **kwargs):
