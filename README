@@ -53,15 +53,14 @@ server_hello_msg:
 
 ------------------------------
 client_verify_msg:
-{
-	box: crypto_box({
+crypto_box({
 		lpub: long-term public key,
 		v: crypto_box(short-term public key),
 		vn: verifybox_nonce,
 		OPTIONAL pskv: crypto_secretbox(server short-term public key)
 		OPTIONAL cav: crypto_sign(long-term public key)
-	})
-}
+		OPTIONAL msg: data
+})
 
  -> v is verifybox, long-term to long-term key
  -> box authenticated with short-term key, encrypted for server short-term key
