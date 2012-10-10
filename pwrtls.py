@@ -173,7 +173,9 @@ class PTLS_Server(PTLS_Socket):
 
 		# receive verification message for authenticating the short-term key
 		data = self._recv_frame()
-		opened = nacl.crypto_box_open(data, snonce(3), self.remote_shortpub, self.shortpriv)
+		try: opened = nacl.crypto_box_open(data, snonce(3), self.remote_shortpub, self.shortpriv)
+		except ValueError:
+			raise pwrtls_exception('Could not open client_verify message.')
 		self.remote_longpub, vbox, vnonce, pskv, cav = from_bson(opened, 'lpub', 'v', 'vn', 'pskv', 'cav')
 
 		# check verifybox
